@@ -1,29 +1,39 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+)
 
-
+// Master holds all the information the master thread needs
 type Master struct {
 	// Your definitions here.
-
+	remaining []string
+	ongoing   []string
+	finished  []string
+	nReduce   int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
-// an example RPC handler.
+// RequestWork is called by workers
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (m *Master) RequestWork(_ *EmptyArgs, reply *RequestWorkReply) error {
+	if len(m.remaining) > 0 {
+		reply.R = m.remaining[0]
+		reply.done = false
+		m.ongoing = append(m.ongoing, reply.R)
+		m.remaining = m.remaining[1:]
+	} else {
+		reply.R = ""
+		reply.done = true
+	}
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +60,6 @@ func (m *Master) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -63,8 +72,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
 
 	// Your code here.
-
-
+	m.remaining = files
+	m.nReduce = nReduce
 	m.server()
 	return &m
 }
