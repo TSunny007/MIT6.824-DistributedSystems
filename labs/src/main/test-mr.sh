@@ -33,7 +33,7 @@ failed_any=0
 # generate the correct output
 ../mrsequential ../../mrapps/wc.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-wc.txt
-rm -f mr-out*
+rm -f mr-out* mr-[0-9]*-[0-9]*
 
 echo '***' Starting wc test.
 
@@ -75,7 +75,7 @@ rm -f mr-*
 # generate the correct output
 ../mrsequential ../../mrapps/indexer.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-indexer.txt
-rm -f mr-out*
+rm -f mr-out* mr-[0-9]*-[0-9]*
 
 echo '***' Starting indexer test.
 
@@ -101,7 +101,7 @@ wait ; wait
 
 echo '***' Starting map parallelism test.
 
-rm -f mr-out* mr-worker*
+rm -f mr-out* mr-[0-9]*-[0-9]* mr-worker*
 
 timeout -k 2s 180s ../mrmaster ../pg*txt &
 sleep 1
@@ -131,7 +131,7 @@ wait ; wait
 
 echo '***' Starting reduce parallelism test.
 
-rm -f mr-out* mr-worker*
+rm -f mr-out* mr-[0-9]*-[0-9]*  mr-worker*
 
 timeout -k 2s 180s ../mrmaster ../pg*txt &
 sleep 1
@@ -139,7 +139,7 @@ sleep 1
 timeout -k 2s 180s ../mrworker ../../mrapps/rtiming.so &
 timeout -k 2s 180s ../mrworker ../../mrapps/rtiming.so
 
-NT=`cat mr-out* | grep '^[a-z] 2' | wc -l | sed 's/ //g'`
+NT=$(cat mr-out* | grep '^[a-z] 2' | wc -l | sed 's/ //g')
 if [ "$NT" -lt "2" ]
 then
   echo '---' too few parallel reduces.
@@ -155,7 +155,7 @@ wait ; wait
 # generate the correct output
 ../mrsequential ../../mrapps/nocrash.so ../pg*txt || exit 1
 sort mr-out-0 > mr-correct-crash.txt
-rm -f mr-out*
+rm -f mr-out* mr-[0-9]*-[0-9]*
 
 echo '***' Starting crash test.
 

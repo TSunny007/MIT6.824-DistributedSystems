@@ -11,12 +11,28 @@ import (
 	"strconv"
 )
 
+const ( // iota is reset to 0
+	mapJob = iota // map -> 0
+	reduceJob = iota // reduce -> 1
+	doneJob = iota // done -> 2
+)
+
 type EmptyArgs struct {
 }
 
-type RequestWorkReply struct {
-	R    string
-	done bool
+type AssignRpc struct {
+	Task  string
+	File  string
+	Phase int
+}
+
+type CompletionRpc struct {
+	File  * string
+	Phase int
+}
+
+type NumberRpc struct {
+	N int
 }
 
 // Add your RPC definitions here.
