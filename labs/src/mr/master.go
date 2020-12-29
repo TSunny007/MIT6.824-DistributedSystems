@@ -12,147 +12,156 @@ import (
 	"time"
 )
 
-
-type MRStage struct {
-	v map[string] string
-	mux sync.Mutex
+type Stage struct {
+	idle       map[string]string
+	pending    map[string]Timer
+	idleMux    *sync.Mutex
+	pendingMux *sync.Mutex
+	cond       *sync.Cond
+	stageCode  int8
 }
 
-type MRTimer struct {
+type Timer struct {
 	s string
 	t *time.Timer
-}
-
-type MRPendingStage struct {
-	v map[string] MRTimer
-	mux sync.Mutex
 }
 
 // Master holds all the information the master thread needs
 type Master struct {
 	// Your definitions here.
-	// mapping of filename to Task number
-	mapIdle       MRStage // initially starts out with all of our files
-	mapPending    MRPendingStage
-	reduceIdle    MRStage
-	reducePending MRPendingStage
-	nReduce       int
-	mapCond       * sync.Cond
-	reduceCond	  * sync.Cond
+	mStage  Stage
+	rStage  Stage
+	nReduce int
+	doneMux *sync.Mutex
+	done    bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
-
-// RequestWork is called by workers
-//
 // the RPC argument and reply types are defined in rpc.go.
-func (m *Master) RespondWork(request *CompletionRpc, reply *AssignRpc) error {
-	if request.File != nil {
+func (m *Master) AssignWork(request *CompletionRPC, reply *AssignRPC) error {
+	reply.NReduce = m.nReduce
+	if len(request.File) > 0 {
 		switch request.Phase {
-		case mapJob:
+		case MAP_JOB:
 			{
-				handleCompletion(*request.File, &m.mapPending, m.mapCond)
+				handleCompletion(request.File, &m.mStage)
 			}
-		case reduceJob:
+		case REDUCE_JOB:
 			{
-				handleCompletion(*request.File, &m.reducePending, m.reduceCond)
+				handleCompletion(request.File, &m.rStage)
 			}
 		}
-		request.File = nil // we have handled this completion request
 	}
-	/**************** Assign map Task ******************/
-	if assignTask(&m.mapIdle, &m.mapPending, reply, mapJob, m.mapCond) {
-		return nil
-	}
-	/********* Cond wait for map tasks to finish *******/
-	if sleepForTask(&m.mapIdle, &m.mapPending, m.mapCond) {
-		return m.RespondWork(request, reply)
-	}
-	/**************** Assign reduce Task  ****************/
-	if assignTask(&m.reduceIdle, &m.reducePending, reply, reduceJob, m.reduceCond) {
-		return nil
-	}
-	/*********** Wait for reduce tasks to finish  *********/
-	if sleepForTask(&m.reduceIdle, &m.reducePending, m.reduceCond) {
-		return m.RespondWork(request, reply)
-	}
-
-	reply.Phase = doneJob
-	return nil
-}
-
-func assignTask(idle *MRStage, pending *MRPendingStage, reply *AssignRpc, job int, cond *sync.Cond) bool {
-	idle.mux.Lock(); defer idle.mux.Unlock()
-	if len(idle.v) > 0 {
-		pending.mux.Lock(); defer pending.mux.Unlock()
-		for file, task := range idle.v {
-			reply.File, reply.Task, reply.Phase = file, task, job
-			delete(idle.v, file)
-			pending.v[file] = MRTimer{task, time.AfterFunc(
-				10*time.Second,
-				taskTimeout(idle, pending, AssignRpc{task, file, job}, cond),
-			)}
-			return true
+	for {
+		if assignTask(&m.mStage, reply) {
+			reply.Phase = MAP_JOB
+			log.Printf("Master - Map: %+v\n", reply)
+			return nil
 		}
-	}
-	return false
-}
-
-func taskTimeout(idle *MRStage, pending *MRPendingStage, reassign AssignRpc, cond *sync.Cond) func() {
-	return func() {
-		idle.mux.Lock(); defer idle.mux.Unlock()
-		pending.mux.Lock(); defer pending.mux.Unlock()
-		defer cond.Broadcast()
-		idle.v[reassign.File] = reassign.Task
-		delete(pending.v, reassign.File)
-	}
-}
-
-func sleepForTask(idle *MRStage, pending *MRPendingStage, cond * sync.Cond) bool {
-	// pending.mux == cond.L, so wait gives up the lock
-	if &pending.mux != cond.L {
-		log.Fatalf("unsynchronized mutex and conditional variable, deadlock will happen\n")
-	}
-	// this segment is weirdly coded to make sure there's no deadlock with pending and idle
-	for ; ; {
-		pending.mux.Lock(); tmp1 := len(pending.v)
-		if tmp1 > 0 {
-			cond.Wait()
-			tmp1 = len(pending.v) // condition could have changed
+		if shouldSleep(&m.mStage) {
+			m.mStage.cond.L.Lock()
+			m.mStage.cond.Wait()
+			m.mStage.cond.L.Unlock()
+			continue
 		}
-		pending.mux.Unlock()
-		idle.mux.Lock(); tmp2 := len(idle.v); idle.mux.Unlock()
-		if  tmp2 > 0 {
-			return true // do we need to go back and redo a job?
-		}
-		if tmp1 + tmp1 == 0 { // both empty
+		if phaseComplete(&m.mStage) {
+			m.mStage.cond.Broadcast()
 			break
 		}
 	}
-	return false
-}
-
-func handleCompletion(file string, pending *MRPendingStage, cond *sync.Cond) {
-	pending.mux.Lock(); defer pending.mux.Unlock()
-	mrTimer, ok := pending.v[file]
-	if !ok {
-		log.Printf("couldn't find %s in map pending, could be a dead job", file)
-		return
+	for {
+		if assignTask(&m.rStage, reply) {
+			reply.Phase = REDUCE_JOB
+			log.Printf("Master - Reduce: %+v\n", reply)
+			return nil
+		}
+		if shouldSleep(&m.rStage) {
+			m.rStage.cond.L.Lock()
+			m.rStage.cond.Wait()
+			m.rStage.cond.L.Unlock()
+			continue
+		}
+		if phaseComplete(&m.rStage) {
+			m.rStage.cond.Broadcast()
+			break
+		}
 	}
-	mrTimer.t.Stop()
-	delete(pending.v, file)
-	if len(pending.v) == 0 {
-		cond.Broadcast()
-	}
-}
-
-// NReduce tells the workers how many buckets to split
-// the intermediate map outputs into
-func (m *Master) RespondNReduce(_ *EmptyArgs, reply *int) error {
-	*reply = m.nReduce
+	m.doneMux.Lock()
+	m.done = true
+	m.doneMux.Unlock()
+	reply.Phase = DONE_JOB
 	return nil
 }
 
+func assignTask(st *Stage, reply *AssignRPC) (r bool) {
+	st.idleMux.Lock()
+	if len(st.idle) > 0 {
+		for file, task := range st.idle {
+			reply.Task, reply.File, reply.Phase = task, file, st.stageCode
+			delete(st.idle, file)
+			r = true
+			break
+		}
+	}
+	st.idleMux.Unlock()
+	if r {
+		st.pendingMux.Lock()
+		st.pending[reply.File] = Timer{reply.Task, time.AfterFunc(
+			10*time.Second,
+			taskTimeout(st, &AssignRPC{reply.File, reply.Task, reply.NReduce, reply.Phase}))}
+		st.pendingMux.Unlock()
+	}
+	return
+}
+
+func shouldSleep(st *Stage) bool {
+	st.idleMux.Lock()
+	defer st.pendingMux.Unlock()
+	st.pendingMux.Lock()
+	defer st.idleMux.Unlock()
+	if len(st.idle) == 0 && len(st.pending) > 0 {
+		return true
+	}
+	return false
+}
+
+func phaseComplete(st *Stage) bool {
+	st.idleMux.Lock()
+	defer st.pendingMux.Unlock()
+	st.pendingMux.Lock()
+	defer st.idleMux.Unlock()
+	return len(st.idle)+len(st.pending) == 0
+}
+
+func taskTimeout(st *Stage, reassign *AssignRPC) func() {
+	return func() {
+		st.idleMux.Lock()
+		st.pendingMux.Lock()
+		log.Printf("timed out with %s", reassign.File)
+		st.idle[reassign.File] = reassign.Task
+		delete(st.pending, reassign.File)
+		st.idleMux.Unlock()
+		st.pendingMux.Unlock()
+		st.cond.Broadcast()
+	}
+}
+
+func handleCompletion(file string, st *Stage) {
+	st.pendingMux.Lock()
+	Timer, ok := st.pending[file]
+	if !ok {
+		log.Printf("dead job %s for stage %d", file, st.stageCode)
+		return
+	}
+	Timer.t.Stop()
+	delete(st.pending, file)
+	if len(st.pending) == 0 {
+		st.pendingMux.Unlock()
+		st.cond.Broadcast()
+	} else {
+		st.pendingMux.Unlock()
+	}
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -170,42 +179,39 @@ func (m *Master) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
-//
-func (m *Master) Done() (r bool) {
-	m.mapIdle.mux.Lock(); defer m.mapIdle.mux.Unlock()
-	m.mapPending.mux.Lock(); defer m.mapPending.mux.Unlock()
-	m.reduceIdle.mux.Lock(); defer m.reduceIdle.mux.Unlock()
-	m.reducePending.mux.Lock(); defer m.reducePending.mux.Unlock()
-	r = (len(m.mapIdle.v) + len(m.mapPending.v) +
-		len(m.reduceIdle.v) + len(m.reducePending.v)) == 0
-	return
+func (m *Master) Done() bool {
+	m.doneMux.Lock()
+	defer m.doneMux.Unlock()
+	return m.done
 }
 
-//
-// create a Master.
-// main/mrmaster.go calls this function.
+// create a Master. main/mrmaster.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
-
-	// Your code here.
-	m.mapIdle = MRStage{v: make(map[string] string)}
+	m := Master{nReduce: nReduce, done: false, doneMux: &sync.Mutex{}}
+	m.mStage = Stage{
+		idle:       make(map[string]string),
+		pending:    make(map[string]Timer),
+		idleMux:    &sync.Mutex{},
+		pendingMux: &sync.Mutex{},
+		cond:       &sync.Cond{L: &sync.Mutex{}},
+		stageCode:  MAP_JOB}
 	for i, file := range files {
-		m.mapIdle.v[file] = strconv.Itoa(i)
+		m.mStage.idle[file] = strconv.Itoa(i)
 	}
-	m.mapPending = MRPendingStage{v: make(map[string]MRTimer)}
-	m.reduceIdle = MRStage{v: make(map[string] string)}
-	for n := 0; n < nReduce; n++ {
-		m.reduceIdle.v[fmt.Sprintf("mr-*-%d", n)] = strconv.Itoa(n)
+
+	m.rStage = Stage{
+		idle:       make(map[string]string),
+		pending:    make(map[string]Timer),
+		idleMux:    &sync.Mutex{},
+		pendingMux: &sync.Mutex{},
+		cond:       &sync.Cond{L: &sync.Mutex{}},
+		stageCode:  REDUCE_JOB}
+	for n := 0; n < m.nReduce; n++ {
+		m.rStage.idle[fmt.Sprintf("mr-*-%d", n)] = strconv.Itoa(n)
 	}
-	m.reducePending = MRPendingStage{v: make(map[string]MRTimer)}
-	m.nReduce = nReduce
-	m.mapCond = sync.NewCond(&m.mapPending.mux)
-	m.reduceCond = sync.NewCond(&m.reducePending.mux)
 
 	m.server()
 	return &m

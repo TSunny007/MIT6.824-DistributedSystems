@@ -28,10 +28,9 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-
 //
 // use ihash(key) % NReduce to choose the reduce
-// Task number for each KeyValue emitted by Map.
+// stage number for each KeyValue emitted by Map.
 //
 func ihash(key string) int {
 	h := fnv.New32a()
@@ -39,34 +38,34 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-// Worker runs the map and the reduce tasks and communicates
+// Worker runs the map and the reduce stages and communicates
 // with the master thread as necessary to get work done
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	// Your worker implementation here.
-	completedTask := CompletionRpc{}
+	completed, assigned := CompletionRPC{}, AssignRPC{}
 	for {
-		workerTask := RequestWork(&completedTask)
-		log.Printf("Assigned File: %s, Task: %s, Phase: %d\n", workerTask.File, workerTask.Task, workerTask.Phase)
-		switch workerTask.Phase {
-		case mapJob:
+		if !call("Master.AssignWork", &completed, &assigned) {
+			os.Exit(0)
+		}
+		log.Printf("Assigned: %+v\n", assigned)
+		switch assigned.Phase {
+		case MAP_JOB:
 			{
-				file, err := os.Open(workerTask.File)
+				file, err := os.Open(assigned.File)
 				if err != nil {
-					log.Fatalf("cannot open %v", workerTask.File)
+					log.Fatalf("cannot open %s\n", assigned.File)
 				}
 				content, err := ioutil.ReadAll(file)
 				if err != nil {
-					log.Fatalf("cannot read %v", workerTask.File)
+					log.Fatalf("cannot read %s\n", assigned.File)
 				}
 				file.Close()
-				kva := mapf(workerTask.File, string(content))
+				kva := mapf(assigned.File, string(content))
 				buckets := make(map[int][]KeyValue)
-				nReduce := RequestNReduce()
 				for _, kv := range kva {
-					bucket := ihash(kv.Key) % nReduce
+					bucket := ihash(kv.Key) % assigned.NReduce
 					l, ok := buckets[bucket]
 					if ok {
 						buckets[bucket] = append(l, kv)
@@ -76,7 +75,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				for bucket, bucketKva := range buckets {
 					sort.Sort(ByKey(bucketKva))
-					tmp, err := ioutil.TempFile("", fmt.Sprintf("temp-%s-%d", workerTask.Task, bucket))
+					tmp, err := ioutil.TempFile("", fmt.Sprintf("temp-%s-%d", assigned.Task, bucket))
 					if err != nil {
 						log.Println("tempfile:", err)
 						return
@@ -90,18 +89,22 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 
 					tmp.Close()
-					outputFile := fmt.Sprintf("mr-%s-%d", workerTask.Task, bucket)
+					outputFile := fmt.Sprintf("mr-%s-%d", assigned.Task, bucket)
+					// Another job beat us to this.
+					if _, err := os.Stat(outputFile); os.IsExist(err) {
+						completed, assigned = CompletionRPC{}, AssignRPC{}
+						continue
+					}
 					if err := os.Rename(tmp.Name(), outputFile); err != nil {
 						log.Printf("Rename error: %v", err)
 					}
 				}
-				completedTask.File = &workerTask.File
 			}
-		case reduceJob:
+		case REDUCE_JOB:
 			{
-				matches, err := filepath.Glob(workerTask.File)
+				matches, err := filepath.Glob(assigned.File)
 				if err != nil {
-					log.Printf("No files matching pattern %s\n", workerTask.File)
+					log.Printf("No files matching pattern %s\n", assigned.File)
 				}
 				var kva []KeyValue
 				for _, file := range matches {
@@ -120,12 +123,12 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 				sort.Sort(ByKey(kva))
 
-				tmp, err := ioutil.TempFile("", fmt.Sprintf("temp-%s", workerTask.Task))
+				tmp, err := ioutil.TempFile("", fmt.Sprintf("temp-%s", assigned.Task))
 				if err != nil {
 					log.Println("tempfile:", err)
 					return
 				}
-				for i:= 0; i < len(kva); {
+				for i := 0; i < len(kva); {
 					j := i + 1
 					for j < len(kva) && kva[j].Key == kva[i].Key {
 						j++
@@ -143,39 +146,34 @@ func Worker(mapf func(string, string) []KeyValue,
 					}
 					i = j
 				}
-				completedFile := fmt.Sprintf("mr-out-%s", workerTask.Task)
-				err = os.Rename(tmp.Name(), completedFile)
-				if err != nil {
+				completedFile := fmt.Sprintf("mr-out-%s", assigned.Task)
+				// Another job beat us to this.
+				if _, err := os.Stat(completedFile); os.IsExist(err) {
+					completed, assigned = CompletionRPC{}, AssignRPC{}
+					continue
+				}
+				if err := os.Rename(tmp.Name(), completedFile); err != nil {
 					log.Printf("Rename error: %v", err)
 				}
-				completedTask.File = &workerTask.File
 			}
-		case doneJob:
+		case DONE_JOB:
 			{
 				os.Exit(0)
 			}
 		}
-		completedTask.Phase = workerTask.Phase
+
+		completed.File = assigned.File
+		completed.Phase = assigned.Phase
+		log.Printf("Completed: %+v\n", completed)
 	}
 }
 
-//
-// example function to show how to make an RPC call to the master.
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func RequestWork(completedTask * CompletionRpc) (reply AssignRpc) {
+func RequestWork(completed CompletionRPC) (reply AssignRPC) {
 	// declare a reply structure.
-	if completedTask != nil {
-		call("Master.RespondWork", completedTask, &reply)
-	} else {
-		call("Master.RespondWork", &CompletionRpc{}, &reply)
-	}
-	return
-}
-
-func RequestNReduce() (reply int) {
-	call("Master.RespondNReduce", &EmptyArgs{}, &reply)
+	call("Master.AssignWork", &completed, &reply)
 	return
 }
 
