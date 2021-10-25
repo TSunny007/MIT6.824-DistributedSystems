@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sort"
 	"sync"
@@ -192,7 +191,7 @@ func (rf *Raft) convertToCandidate() {
 	rf.state = Candidate
 	rf.votedFor = rf.me
 	rf.currentTerm++
-	fmt.Printf("convert to candidate: %d, term: %d\n", rf.me, rf.currentTerm)
+	// fmt.Printf("convert to candidate: %d, term: %d\n", rf.me, rf.currentTerm)
 	rf.votesGranted = 1
 	rf.resetTimer()
 
@@ -201,7 +200,7 @@ func (rf *Raft) convertToCandidate() {
 
 func (rf *Raft) convertToLeader() {
 	rf.heartbeatTimer.Stop()
-	fmt.Printf("New Leader: %d\n", rf.me)
+	// fmt.Printf("New Leader: %d\n", rf.me)
 	rf.state = Leader
 	// volatile state on leaders reinitialized after election
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -247,6 +246,10 @@ func (rf *Raft) startAppendEntries() {
 				PrevLogTerm:  rf.log[prevLogIndex].Term,
 				LogEntry:     rf.log[prevLogIndex+1:],
 				LeaderCommit: rf.commitIndex}
+
+			// if len(request.LogEntry) > 0 {
+			// 	fmt.Printf("Leader(Me): %d, To: %d, logEntry: %v, prevIndex: %d, prevTerm: %d, leaderCommit: %d\n", rf.me, i, request.LogEntry, request.PrevLogTerm, request.PrevLogIndex, request.LeaderCommit)
+			// }
 
 			go func(i int, request *AppendEntriesRequest) {
 				reply := &AppendEntriesReply{}
@@ -413,7 +416,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesRe
 			if len(rf.log)-1 >= nextIndex {
 				// If existing entry conflicts with a new one (same index but different term), delete the existing entry and all that follow it
 				if rf.log[nextIndex].Term != args.LogEntry[i].Term {
-					rf.log = rf.log[:nextIndex-1]
+					rf.log = rf.log[:nextIndex]
 				} else {
 					// we already contain this element
 					continue
@@ -422,7 +425,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesRe
 			// append the new entries after we have either flushed the logs or confirmed it doesn't exist
 			rf.log = append(rf.log, args.LogEntry[i])
 		}
-		fmt.Printf("Me: %d, Leader: %d, logs: %v\n", rf.me, args.LeaderID, rf.log)
+		// fmt.Printf("Me: %d, Leader: %d, logs: %v\n", rf.me, args.LeaderID, rf.log)
 	}
 
 	// if leader commit > commit index, set commitIndex = min(leaderCommit, index of last new entry)
@@ -434,6 +437,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesRe
 			newCommitIndex = args.LeaderCommit
 		}
 		for i := rf.commitIndex + 1; i <= newCommitIndex; i++ {
+			// ("Me: %d, Leader: %d, term %v, command: %v, commandIdx: %v\n", rf.me, args.LeaderID, args.Term, rf.log[i].Cmd, i)
 			rf.applyCh <- ApplyMsg{
 				Command:      rf.log[i].Cmd,
 				CommandIndex: i,
@@ -508,7 +512,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			return -1, -1, false
 		}
 		rf.log = append(rf.log, Entry{Cmd: command, Term: rf.currentTerm})
-		return rf.commitIndex + 1, rf.currentTerm, true
+		return len(rf.log) - 1, rf.currentTerm, true
 	}
 	return -1, -1, false
 }
